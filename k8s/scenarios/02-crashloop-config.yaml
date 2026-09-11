@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-auth-service
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: user-auth-service
+  template:
+    metadata:
+      labels:
+        app: user-auth-service
+    spec:
+      containers:
+      - name: auth-web
+        image: busybox
+        command: ["sh", "-c"]
+        args:
+          - |
+            echo "Starting User Auth Service v2.1.0..."
+            if [ -z "$DATABASE_AUTH_KEY" ]; then
+              echo "FATAL: Required environment variable DATABASE_AUTH_KEY is missing! Exiting." >&2
+              exit 1
+            fi
+            sleep 3600

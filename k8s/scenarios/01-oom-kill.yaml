@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-processor
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-processor
+  template:
+    metadata:
+      labels:
+        app: payment-processor
+    spec:
+      containers:
+      - name: memory-eater
+        image: python:3.9-alpine
+        command: ["python3", "-c"]
+        args:
+          - |
+            import time
+            arr = []
+            print("Starting payment processor...", flush=True)
+            while True:
+                arr.append(b" " * 10 * 1024 * 1024) # 10MB chunks
+                print("Allocating memory...", flush=True)
+                time.sleep(0.5)
+        resources:
+          limits:
+            memory: "50Mi"
+          requests:
+            memory: "20Mi"

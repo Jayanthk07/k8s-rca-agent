@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-api
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: checkout-api
+  template:
+    metadata:
+      labels:
+        app: checkout-api
+    spec:
+      containers:
+      - name: checkout
+        image: busybox
+        command: ["sh", "-c"]
+        args:
+          - |
+            while true; do
+              echo "Processing checkout queue..."
+              nc -z -w 2 inventory-db 5432
+              if [ $? -ne 0 ]; then
+                echo "[ERROR] [500] Failed to establish TCP connection to upstream inventory-db:5432. Connection refused." >&2
+              else
+                echo "[INFO] [200] Checkout transaction completed."
+              fi
+              sleep 3
+            done
