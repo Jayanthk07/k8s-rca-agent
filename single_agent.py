@@ -12,8 +12,12 @@ def sanitize_untrusted_data(raw_text: str, max_chars: int = 4000) -> str:
 
 class ReadOnlyK8sClient:
     def __init__(self):
-        config.load_kube_config()
+        try:
+            config.load_incluster_config()
+        except config.ConfigException:
+            config.load_kube_config()
         self.core_v1 = client.CoreV1Api()
+        self.apps_v1 = client.AppsV1Api()
 
     def get_pods(self, namespace="default"):
         pods = self.core_v1.list_namespaced_pod(namespace)
