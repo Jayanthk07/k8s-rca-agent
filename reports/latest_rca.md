@@ -1,33 +1,54 @@
 ## Root Cause
-The `auth-web` container in the `user-auth-service` deployment uses a standard utility image (`busybox`) without a long-running command specified in its configuration. When started, the default entrypoint exits immediately, causing Kubernetes to register a container failure and repeatedly trigger back-off restarts (`CrashLoopBackOff`).
+The container `memory-eater` in pod `payment-processor-dfdbf8cb-ccdp9` is repeatedly crashing due to uncontrolled memory allocation (Out Of Memory / OOM exhaustion). The application continuously allocates memory until it is terminated by the system, leading to repeated container restarts (13 restarts recorded) and crash back-off loops.
+
+---
+
+## Timeline of Events
+1. **Deployment Scaling**: `payment-processor` scaled up ReplicaSet `payment-processor-dfdbf8cb` to 1 replica.
+2. **Pod Creation**: Pod `payment-processor-dfdbf8cb-ccdp9` was created and scheduled to node `rca-cluster-control-plane`.
+3. **Container Initialization**: Image `python:3.9-alpine` was pulled and container `memory-eater` was started.
+4. **Application Failure**: The application began running, printing startup logs, and entering an unbounded memory allocation loop until crashing.
+5. **Restart Loop**: Kubelet detected container failure and initiated restart back-offs, accumulating 13 restarts.
 
 ---
 
 ## Observed Facts
-1. **Pod Scheduling and Image Pulls**: Pods `user-auth-service-6cc4fb5cd5-dpmbd` and `user-auth-service-6cc4fb5cd5-hvd8c` were successfully scheduled to `rca-cluster-control-plane` and pulled the `busybox` image.
-2. **Container Lifecycle**: The `auth-web` container in both pods was created and started, but failed immediately afterwards.
-3. **Event Warnings**: Kubernetes generated `Back-off restarting failed container auth-web` warning events for both `user-auth-service` pods.
-4. **Current Cluster Pod State**: Neither `user-auth-service` pod is currently listed as `Running` in the pod status list (only `checkout-api` pods are running).
+* **Pod Restarts**: Pod `payment-processor-dfdbf8cb-ccdp9` has accumulated 13 restarts.
+* **Container Name**: The container is named `memory-eater`.
+* **Crash Logs**: Both `previous` and `current` logs show the process starting and printing repeated lines of `Allocating memory...` before terminating abruptly.
+* **Events**: Kubelet logged warning `Back-off restarting failed container memory-eater in pod payment-processor-dfdbf8cb-ccdp9`.
+* **Node Health**: The host node `rca-cluster-control-plane` is `NodeReady` with `NodeHasSufficientMemory`.
 
 ---
 
 ## Hypotheses Evaluated
-1. **Missing or Non-Blocking Command in `busybox` Image (Confirmed)**: Base `busybox` images default to a shell (`/bin/sh`) which terminates immediately when no interactive terminal or continuous command (e.g., `sleep infinity` or a web server binary) is supplied. This leads to immediate exit upon start.
-2. **Image Pull Failure (Rejected)**: Events explicitly confirm `Successfully pulled image "busybox"` within 1.3–5.5 seconds.
-3. **Node Resource or Scheduling Constraints (Rejected)**: Pods were successfully assigned and created on `rca-cluster-control-plane`.
+
+| Hypothesis | Status | Reasoning |
+| :--- | :--- | :--- |
+| **Unbounded Memory Allocation / OOM** | **Confirmed** | Logs explicitly show continuous memory allocation (`Allocating memory...`) followed by immediate container termination across restarts. |
+| **Node Resource Starvation** | **Disproven** | Control plane events indicate the node itself is healthy (`NodeHasSufficientMemory`, `NodeHasNoDiskPressure`, `NodeHasSufficientPID`). |
+| **Startup or Image Pull Failure** | **Disproven** | Image pulled successfully (`python:3.9-alpine`) and the container starts up normally before crashing during execution. |
 
 ---
 
 ## Supporting Evidence
-* **Event Sequence**: `Created container auth-web` $\rightarrow$ `Started container auth-web` $\rightarrow$ `Back-off restarting failed container auth-web`.
-* **Image Context**: The container `auth-web` is running `busybox`, which is missing an active service executable or long-running script required to keep a web service container alive.
+* `Crash Logs`:
+  ```text
+  Starting payment processor...
+  Allocating memory...
+  Allocating memory...
+  Allocating memory...
+  Allocating memory...
+  ```
+* `Events`: `[Warning] payment-processor-dfdbf8cb-ccdp9: Back-off restarting failed container memory-eater in pod payment-processor-dfdbf8cb-ccdp9_default(...)`
+* `Pod State`: `restarts: 13`
 
 ---
 
 ## Confidence Level
-High (90%)
+**High (95%)**
 
 ---
 
 ## Uncertainty
-The specific Pod specification (e.g., `command` / `args` fields) and container exit codes are not explicitly provided in the input, but the behavior pattern is classic for default utility containers exiting immediately upon invocation.
+* The exact exit code (e.g., `137` for SIGKILL / OOM) and container resource limits (`resources.limits.memory`) were not provided in the cluster snapshot, though the logs and behavior strongly confirm memory exhaustion.

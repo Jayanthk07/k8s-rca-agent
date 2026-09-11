@@ -31,34 +31,59 @@ class ReadOnlyK8sClient:
         parsed = [f"[{e.type}] {e.involved_object.name}: {e.message}" for e in events.items[-20:]]
         return sanitize_untrusted_data("\n".join(parsed))
 
+    def get_services(self, namespace="default"):
+        svcs = self.core_v1.list_namespaced_service(namespace)
+        return [{"name": s.metadata.name, "type": s.spec.type, "cluster_ip": s.spec.cluster_ip} for s in svcs.items]
+
+    def get_endpoints(self, namespace="default"):
+        eps = self.core_v1.list_namespaced_endpoints(namespace)
+        results = []
+        for ep in eps.items:
+            subsets = ep.subsets if ep.subsets else []
+            addresses = sum([len(s.addresses) if s.addresses else 0 for s in subsets])
+            results.append({"name": ep.metadata.name, "active_endpoints": addresses})
+        return results
+
 def main():
-    api_key = "gemini-api-key"
-    if not api_key:
-        print("ERROR: Please set your GEMINI_API_KEY environment variable.")
+  
+    api_key = "your-api-key"
+
+    if not api_key or api_key == "your-api-key":
+        print("ERROR: Please replace 'your-api-key' with your actual Gemini API key in single_agent.py")
         return
         
     print("==> Initializing K8s Client...")
     k8s = ReadOnlyK8sClient()
     
-    print("==> Gathering Cluster Evidence (Pods, Events, Logs)...")
+
+    print("==> Gathering Cluster Evidence (Pods, Services, Endpoints, Events, Logs)...")
     pods = k8s.get_pods()
     events = k8s.get_events()
-    
+    services = k8s.get_services()
+    endpoints = k8s.get_endpoints()
+
     logs_data = {}
     for p in pods:
-        if p["restarts"] > 0 or p["status"] != "Running":
-            logs_data[p["name"]] = {
-                "current": k8s.get_pod_logs(p["name"]),
-                "previous": k8s.get_pod_logs(p["name"], previous=True)
-            }
+        logs_data[p["name"]] = {
+            "current": k8s.get_pod_logs(p["name"]),
+            "previous": k8s.get_pod_logs(p["name"], previous=True)
+        }
+
 
     sys_inst = (
         "You are an expert Kubernetes Root-Cause Analysis (RCA) AI.\n"
         "Investigate the provided cluster data. Distinguish between symptoms and the root cause.\n"
         "Format your output strictly using the following Markdown sections:\n"
-        "## Root Cause\n## Observed Facts\n## Hypotheses Evaluated\n## Supporting Evidence\n## Confidence Level\n## Uncertainty"
+        "## Root Cause\n## Timeline of Events\n## Observed Facts\n## Hypotheses Evaluated\n## Supporting Evidence\n## Confidence Level\n## Uncertainty"
     )
-    prompt = f"Cluster State:\nPods: {json.dumps(pods, indent=2)}\n\nEvents:\n{events}\n\nCrash Logs:\n{json.dumps(logs_data, indent=2)}"
+    
+
+    prompt = (
+        f"Cluster State:\nPods: {json.dumps(pods, indent=2)}\n"
+        f"Services: {json.dumps(services, indent=2)}\n"
+        f"Endpoints: {json.dumps(endpoints, indent=2)}\n\n"
+        f"Events:\n{events}\n\nCrash Logs:\n{json.dumps(logs_data, indent=2)}"
+    )
 
     print("==> Analyzing evidence with Gemini API...")
     llm_client = genai.Client(api_key=api_key)
