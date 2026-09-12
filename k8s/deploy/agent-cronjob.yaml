@@ -1,0 +1,23 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: k8s-rca-agent
+  namespace: default
+spec:
+  schedule: "*/5 * * * *" # Runs every 5 minutes automatically
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: rca-agent-sa # Uses your secure RBAC sandbox!
+          containers:
+          - name: rca-agent
+            image: rca-agent:latest
+            imagePullPolicy: Never
+            env:
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gemini-secret
+                  key: api-key
+          restartPolicy: OnFailure

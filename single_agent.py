@@ -1,4 +1,4 @@
-import os, json, re
+import os, json, re, datetime
 from kubernetes import client, config
 from google import genai
 from google.genai import types
@@ -19,9 +19,15 @@ class ReadOnlyK8sClient:
         self.core_v1 = client.CoreV1Api()
         self.apps_v1 = client.AppsV1Api()
 
-    def get_pods(self, namespace="default"):
-        pods = self.core_v1.list_namespaced_pod(namespace)
-        return [{"name": p.metadata.name, "status": p.status.phase, "restarts": sum([c.restart_count for c in p.status.container_statuses or []])} for p in pods.items]
+    def get_pods(self, namespace=""):
+        # Upgraded to support all namespaces if namespace is empty
+        if namespace == "":
+            pods = self.core_v1.list_pod_for_all_namespaces()
+        else:
+            pods = self.core_v1.list_namespaced_pod(namespace)
+        
+        # Added 'namespace' to the return dict so log fetching knows where to look
+        return [{"name": p.metadata.name, "namespace": p.metadata.namespace, "status": p.status.phase, "restarts": sum([c.restart_count for c in p.status.container_statuses or []])} for p in pods.items]
 
     def get_pod_logs(self, pod_name, namespace="default", previous=False):
         try:
@@ -30,17 +36,26 @@ class ReadOnlyK8sClient:
         except Exception as e:
             return f"Log retrieval error: {str(e)}"
 
-    def get_events(self, namespace="default"):
-        events = self.core_v1.list_namespaced_event(namespace)
+    def get_events(self, namespace=""):
+        if namespace == "":
+            events = self.core_v1.list_event_for_all_namespaces()
+        else:
+            events = self.core_v1.list_namespaced_event(namespace)
         parsed = [f"[{e.type}] {e.involved_object.name}: {e.message}" for e in events.items[-20:]]
         return sanitize_untrusted_data("\n".join(parsed))
 
-    def get_services(self, namespace="default"):
-        svcs = self.core_v1.list_namespaced_service(namespace)
+    def get_services(self, namespace=""):
+        if namespace == "":
+            svcs = self.core_v1.list_service_for_all_namespaces()
+        else:
+            svcs = self.core_v1.list_namespaced_service(namespace)
         return [{"name": s.metadata.name, "type": s.spec.type, "cluster_ip": s.spec.cluster_ip} for s in svcs.items]
 
-    def get_endpoints(self, namespace="default"):
-        eps = self.core_v1.list_namespaced_endpoints(namespace)
+    def get_endpoints(self, namespace=""):
+        if namespace == "":
+            eps = self.core_v1.list_endpoints_for_all_namespaces()
+        else:
+            eps = self.core_v1.list_namespaced_endpoints(namespace)
         results = []
         for ep in eps.items:
             subsets = ep.subsets if ep.subsets else []
@@ -49,8 +64,8 @@ class ReadOnlyK8sClient:
         return results
 
 def main():
-  
-    api_key = "your-api-key"
+    # Tries to get the key from Kubernetes, otherwise falls back to a placeholder
+    api_key = os.environ.get("GEMINI_API_KEY", "your-api-key")
 
     if not api_key or api_key == "your-api-key":
         print("ERROR: Please replace 'your-api-key' with your actual Gemini API key in single_agent.py")
@@ -59,20 +74,26 @@ def main():
     print("==> Initializing K8s Client...")
     k8s = ReadOnlyK8sClient()
     
-
     print("==> Gathering Cluster Evidence (Pods, Services, Endpoints, Events, Logs)...")
-    pods = k8s.get_pods()
-    events = k8s.get_events()
-    services = k8s.get_services()
-    endpoints = k8s.get_endpoints()
+    
+    # Wrapped in try/except to prevent stack-traces if cluster is unreachable
+    try:
+        pods = k8s.get_pods()
+        events = k8s.get_events()
+        services = k8s.get_services()
+        endpoints = k8s.get_endpoints()
 
-    logs_data = {}
-    for p in pods:
-        logs_data[p["name"]] = {
-            "current": k8s.get_pod_logs(p["name"]),
-            "previous": k8s.get_pod_logs(p["name"], previous=True)
-        }
-
+        logs_data = {}
+        for p in pods:
+            # Dynamically pass the pod's specific namespace so it works across the whole cluster
+            ns = p.get("namespace", "default")
+            logs_data[p["name"]] = {
+                "current": k8s.get_pod_logs(p["name"], namespace=ns),
+                "previous": k8s.get_pod_logs(p["name"], namespace=ns, previous=True)
+            }
+    except Exception as e:
+        print(f"[FATAL] Kubernetes API Error: {e}")
+        return
 
     sys_inst = (
         "You are an expert Kubernetes Root-Cause Analysis (RCA) AI.\n"
@@ -81,7 +102,6 @@ def main():
         "## Root Cause\n## Timeline of Events\n## Observed Facts\n## Hypotheses Evaluated\n## Supporting Evidence\n## Confidence Level\n## Uncertainty"
     )
     
-
     prompt = (
         f"Cluster State:\nPods: {json.dumps(pods, indent=2)}\n"
         f"Services: {json.dumps(services, indent=2)}\n"
@@ -90,22 +110,34 @@ def main():
     )
 
     print("==> Analyzing evidence with Gemini API...")
-    llm_client = genai.Client(api_key=api_key)
-    response = llm_client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(system_instruction=sys_inst, temperature=0.2)
-    )
     
-    report = response.text
-    os.makedirs("reports", exist_ok=True)
-    with open("reports/latest_rca.md", "w") as f:
-        f.write(report)
-    
-    print("\n" + "="*50)
-    print("ROOT CAUSE ANALYSIS REPORT")
-    print("="*50 + "\n")
-    print(report)
+    # Wrapped in try/except to handle API drops gracefully
+    try:
+        llm_client = genai.Client(api_key=api_key)
+        response = llm_client.models.generate_content(
+            model="gemini-3.6-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(system_instruction=sys_inst, temperature=0.2)
+        )
+        
+        report = response.text
+        os.makedirs("reports", exist_ok=True)
+        
+        # Switched to timestamped reports so you don't lose history
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"reports/rca_{timestamp}.md"
+        
+        with open(filename, "w") as f:
+            f.write(report)
+        
+        print("\n" + "="*50)
+        print("ROOT CAUSE ANALYSIS REPORT")
+        print("="*50 + "\n")
+        print(report)
+        print(f"\n[SUCCESS] Report saved to {filename}")
+        
+    except Exception as e:
+        print(f"[FATAL] LLM API Error: {e}")
 
 if __name__ == "__main__":
     main()
